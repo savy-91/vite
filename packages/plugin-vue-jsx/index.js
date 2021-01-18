@@ -1,4 +1,4 @@
-// @ts-check
+const fs = require('fs')
 const babel = require('@babel/core')
 const jsx = require('@vue/babel-plugin-jsx')
 const importMeta = require('@babel/plugin-syntax-import-meta')
@@ -43,6 +43,7 @@ function vueJsxPlugin(options = {}) {
   let root = ''
   let needHmr = false
   let needSourceMap = true
+  let tsconfig
 
   return {
     name: 'vite:vue-jsx',
@@ -55,10 +56,10 @@ function vueJsxPlugin(options = {}) {
         ? config.define.__VUE_PROD_DEVTOOLS__
         : undefined
       return {
-        // only apply esbuild to ts files
-        // since we are handling jsx and tsx now
+        // jsx and tsx? are handled by this plugin
+        // disable esbuild
         esbuild: {
-          include: /\.ts$/
+          include: /\.esbuild\./
         },
         define: {
           __VUE_OPTIONS_API__: optionsApi != null ? optionsApi : true,
@@ -88,26 +89,50 @@ function vueJsxPlugin(options = {}) {
     transform(code, id, opt) {
       const ssr = typeof opt === 'boolean' ? opt : (opt && opt.ssr) === true
       const {
-        include,
-        exclude,
+        include = /\.(jsx|tsx?)$/,
+        exclude = /\.esbuild\./,
         babelPlugins = [],
         ...babelPluginOptions
       } = options
 
-      const filter = createFilter(include || /\.[jt]sx$/, exclude)
-      const [filepath] = id.split('?')
+      const filter = createFilter(include, exclude)
 
-      // use id for script blocks in Vue SFCs (e.g. `App.vue?vue&type=script&lang.jsx`)
-      // use filepath for plain jsx files (e.g. App.jsx)
-      if (filter(id) || filter(filepath)) {
-        const plugins = [importMeta, [jsx, babelPluginOptions], ...babelPlugins]
-        if (id.endsWith('.tsx') || filepath.endsWith('.tsx')) {
-          plugins.push([
-            require('@babel/plugin-transform-typescript'),
-            // @ts-ignore
-            { isTSX: true, allowExtensions: true }
-          ])
+      if (filter(id)) {
+        if (/\.tsx?/.test(id)) {
+          const ts = require('typescript')
+          if (!tsconfig) {
+            const configPath = ts.findConfigFile(
+              './',
+              ts.sys.fileExists,
+              'tsconfig.json'
+            )
+            if (!configPath) {
+              throw new Error('Could not find a valid "tsconfig.json".')
+            }
+            tsconfig = ts.parseJsonConfigFileContent(
+              { extends: './tsconfig.json' },
+              ts.sys,
+              path.dirname(path.resolve(configPath))
+            )
+            if (!tsconfig.compilerOptions) tsconfig.compilerOptions = {}
+            Object.assign(tsconfig.compilerOptions, {
+              sourceMap: false,
+              inlineSourceMap: needSourceMap,
+              inlineSources: needSourceMap
+            })
+          }
+          const { outputText, diagnostics } = ts.transpileModule(code, {
+            compilerOptions: tsconfig.options,
+            fileName: id,
+            reportDiagnostics: true
+          })
+          if (diagnostics?.[0]) throw new Error(diagnostics[0].messageText)
+          code = outputText
         }
+
+        /** @type {any[]} */
+        const plugins = [importMeta, ...babelPlugins]
+        if (id.endsWith('x')) plugins.push([jsx, babelPluginOptions])
 
         const result = babel.transformSync(code, {
           babelrc: false,
